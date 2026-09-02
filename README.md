@@ -57,7 +57,8 @@ Coordinates come from `egui_tree` bounds (logical points).
 
 ## Notes
 
-- Screenshots require a visible window; a fully occluded or minimized window (notably on macOS) times out. Tree reads and input injection work in the background.
+- **The app window must be in the foreground** (at least on macOS) for tool calls to work reliably. A background window produces no GPU frames, so requests block until the 20 s inspection timeout ("app is not painting"). Bring the window to front, e.g. `osascript -e 'tell application "System Events" to set frontmost of application process "your-app" to true'`.
+- Screenshots additionally require a visible (not occluded/minimized) window.
 - The inspection port has no authentication — loopback only unless you know what you are doing.
 - Node ID values exceed 2^53; they are stringified for stability.
 
