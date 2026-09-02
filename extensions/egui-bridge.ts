@@ -871,6 +871,66 @@ export default function (pi) {
   });
 
   pi.registerTool({
+    name: "egui_drag",
+    label: "EGUI Drag",
+    description:
+      "Drag from [x1,y1] to [x2,y2] in logical points (for splitters, sliders, drag handles). Sends press, then per-step move, then release as separate frames so egui's drag state machine engages. Each step is 10 points.",
+    parameters: Type.Object({
+      x1: Type.Number({ description: "Start X (on the drag handle)" }),
+      y1: Type.Number({ description: "Start Y (on the drag handle)" }),
+      x2: Type.Number({ description: "End X" }),
+      y2: Type.Number({ description: "End Y" }),
+      steps: Type.Optional(
+        Type.Number({ description: "Number of move frames (default 10)" }),
+      ),
+      stepDelayMs: Type.Optional(
+        Type.Number({ description: "Delay between frames in ms (default 120)" }),
+      ),
+    }),
+    async execute(_id, params) {
+      const c = requireClient();
+      const steps = params.steps ?? 10;
+      const delay = params.stepDelayMs ?? 120;
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      // Frame 1: move + press.
+      await c.request({
+        ApplyEvents: {
+          events: [
+            pointerMoved([params.x1, params.y1]),
+            pointerButton([params.x1, params.y1], true),
+          ],
+        },
+      });
+      await sleep(delay);
+      // Move frames: one event per frame.
+      for (let i = 1; i <= steps; i++) {
+        const x = params.x1 + ((params.x2 - params.x1) * i) / steps;
+        const y = params.y1 + ((params.y2 - params.y1) * i) / steps;
+        await c.request({
+          ApplyEvents: { events: [pointerMoved([x, y])] },
+        });
+        await sleep(delay);
+      }
+      // Release frame.
+      const response = await c.request({
+        ApplyEvents: {
+          events: [pointerButton([params.x2, params.y2], false)],
+        },
+      });
+      unwrapResponse(response, "egui_drag");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `dragged (${params.x1}, ${params.y1}) -> (${params.x2}, ${params.y2})`,
+          },
+        ],
+        details: {},
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "egui_batch",
     label: "EGUI Batch",
     description: "Send multiple raw egui events in a single frame (advanced).",

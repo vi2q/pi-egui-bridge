@@ -43,6 +43,7 @@ The port defaults to `127.0.0.1:5719`; `EGUI_INSPECTION=<addr>` overrides it. Un
 | `egui_tree` | flattened AccessKit tree (role, label, value, bounds, children) |
 | `egui_screenshot` | PNG capture, returned inline as an image |
 | `egui_click` / `egui_hover` / `egui_scroll` | pointer interaction at logical-point coordinates. Scroll: `delta` positive = content moves down (scroll up); use negative values to scroll down. |
+| `egui_drag` | press → move → release drag across frames (splitters, sliders). Required: egui needs separate frames for press/move/release to engage its drag state machine. |
 | `egui_type` / `egui_key` | text input into the focused widget / key press |
 | `egui_resize` / `egui_settle` / `egui_batch` | window resize / wait for idle / raw event batch |
 
