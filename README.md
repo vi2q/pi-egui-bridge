@@ -4,8 +4,6 @@
 
 No MCP server or extra binary required: the extension speaks the wire protocol (length-prefixed MessagePack over TCP) directly.
 
-![screenshot](https://raw.githubusercontent.com/vi2q/pi-egui-bridge/main/docs/screenshot.png)
-
 ## Install
 
 ```bash
