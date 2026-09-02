@@ -514,8 +514,16 @@ function pointerButton([x, y], pressed) {
   };
 }
 function mouseWheel(deltaX, deltaY, [x, y]) {
+  // serde: MouseWheel { unit, delta, phase, modifiers }. egui semantics:
+  // positive delta moves the viewed content down (i.e. scrolls up);
+  // pass negative deltaY to scroll down.
   return {
-    MouseWheel: { delta: [deltaX, deltaY], pos: [x, y], modifiers: NO_MODS },
+    MouseWheel: {
+      unit: "Point",
+      delta: [deltaX, deltaY],
+      phase: "Move",
+      modifiers: NO_MODS,
+    },
   };
 }
 function textEvent(text) {
@@ -726,21 +734,24 @@ export default function (pi) {
     name: "egui_scroll",
     label: "EGUI Scroll",
     description:
-      "Scroll at the given position. Positive deltaY scrolls down (or as the app interprets).",
+      "Scroll at the given position. Positive deltaY scrolls up (content moves down); use negative deltaY to scroll down. Units are egui points.",
     parameters: Type.Object({
       ...pointerXY,
       deltaX: Type.Optional(
         Type.Number({ description: "Horizontal delta (default 0)" }),
       ),
       deltaY: Type.Optional(
-        Type.Number({ description: "Vertical delta (default 1 line)" }),
+        Type.Number({
+          description:
+            "Vertical delta in points; negative scrolls down (default -40 ≈ 2 lines down)",
+        }),
       ),
     }),
     async execute(_id, params) {
       const c = requireClient();
       const events = [
         pointerMoved([params.x, params.y]),
-        mouseWheel(params.deltaX ?? 0, params.deltaY ?? 1, [
+        mouseWheel(params.deltaX ?? 0, params.deltaY ?? -40, [
           params.x,
           params.y,
         ]),
