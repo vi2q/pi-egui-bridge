@@ -75,7 +75,16 @@ warning when `EGUI_INSPECTION` is set on such a binary):
 
 ```sh
 cargo build -p azparam-agent-harness --features inspection
+
+# plain editor start (project picker):
 EGUI_INSPECTION=1 ./target/debug/azparam-agent-harness
+
+# fixture start: open project + engine scene immediately, no picker
+EGUI_INSPECTION=1 ./target/debug/azparam-agent-harness \
+  --core-bin=./target/debug/azparam \
+  --core-arg=--project=ddd \
+  --core-arg=--scene=engine \
+  --core-arg=--player-mode
 ```
 
 Notes:
