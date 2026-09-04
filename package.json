@@ -20,6 +20,6 @@
     "typebox": "*"
   },
   "scripts": {
-    "test": "node --experimental-strip-types test/smoke.mjs"
+    "test": "node --experimental-strip-types --import ./test/mock-pi.mjs test/smoke.mjs"
   }
 }

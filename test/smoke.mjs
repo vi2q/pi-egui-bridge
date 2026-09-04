@@ -153,6 +153,10 @@ server.listen(PORT, "127.0.0.1", async () => {
     const clicked = await registry.egui_click_at.execute("t5", { label: "Ground", settle: false });
     assert(clicked.content[0].text.includes("(1052, 320)"), `click center should be (1052, 320), got: ${clicked.content[0].text}`);
 
+    // egui_click_at verify option (act + re-check in one call)
+    const verified = await registry.egui_click_at.execute("t5b", { label: "Ground", settle: false, verify: true });
+    assert(verified.content[0].text.includes("verified after click: button label=\"Ground\""), `verify should re-report the node: ${verified.content[0].text}`);
+
     // egui_type_into (regression: must use ApplyEvents, not ApplyText)
     const typed = await registry.egui_type_into.execute("t6", { role: "spinButton", text: "7.0", submit: true });
     assert(typed.content[0].text.includes('typed "7.0" + Enter'), "egui_type_into should type with Enter");
