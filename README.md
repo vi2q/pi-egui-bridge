@@ -67,6 +67,22 @@ Notes:
 - `entity_id` must be a runtime entity **UUID** from `engine_list_entities` (or the harness hierarchy), not an index.
 - The tool catalog depends on the core's current app mode (editor / engine / editor2d / audio).
 
+## Building & launching (harness side)
+
+The canonical build keeps the inspection feature on — a plain `cargo build`
+silently drops it and the tools then refuse to connect (the harness logs a
+warning when `EGUI_INSPECTION` is set on such a binary):
+
+```sh
+cargo build -p azparam-agent-harness --features inspection
+EGUI_INSPECTION=1 ./target/debug/azparam-agent-harness
+```
+
+Notes:
+- `EGUI_INSPECTION=1` binds `127.0.0.1:5719`; unset or `0` disables inspection entirely.
+- Only one harness instance at a time: the spawned core claims MCP/command port 9315, and 5719 is the inspection port.
+- The window must stay in the foreground; backgrounded windows stop painting and every tool call times out until re-fronted.
+
 ## Usage
 
 Start your app, then in pi:

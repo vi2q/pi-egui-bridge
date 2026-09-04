@@ -1,6 +1,6 @@
 {
   "name": "pi-egui-bridge",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "pi extension: inspect and drive live egui apps (AccessKit tree, click, type, screenshot) over the egui_inspection protocol",
   "license": "MIT",
   "keywords": [
@@ -18,5 +18,8 @@
   },
   "peerDependencies": {
     "typebox": "*"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types test/smoke.mjs"
   }
 }

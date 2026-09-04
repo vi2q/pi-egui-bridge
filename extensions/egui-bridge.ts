@@ -26,6 +26,18 @@ const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 // Default per-request timeout: tools must not hang pi forever when the app
 // stops responding (user request 2026-09-04).
 const REQUEST_TIMEOUT_MS = 30_000;
+// Valid egui_inspection request kinds (single-key tagged enum). Sending an
+// unknown kind makes the server never answer, so the request hangs until the
+// 30s timeout and desyncs the connection (root cause of the 2026-09-04
+// egui_type_into outage). Validate eagerly instead.
+const VALID_REQUEST_KINDS = new Set([
+  "GetInfo",
+  "GetTree",
+  "GetScreenshot",
+  "ApplyEvents",
+  "Settle",
+  "Resize",
+]);
 // Cumulative inline-image budget for the whole session (user instruction
 // 2026-09-04): pi resends the full history every turn and provider request-body
 // limits (e.g. 4.5 MiB) are byte-based, while pi's auto-compaction is
@@ -433,6 +445,14 @@ class InspectionClient {
   }
 
   request(request, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const kind = typeof request === "string" ? request : Object.keys(request)[0];
+    if (!VALID_REQUEST_KINDS.has(kind)) {
+      return Promise.reject(
+        new Error(
+          `unknown request kind '${kind}' — valid kinds: ${[...VALID_REQUEST_KINDS].join(", ")} (this is an extension bug, not an app problem)`,
+        ),
+      );
+    }
     if (!this.socket)
       return Promise.reject(
         new Error("not connected — call egui_attach first"),
@@ -453,9 +473,12 @@ class InspectionClient {
         settled = true;
         const idx = this.pending.indexOf(wrapped);
         if (idx >= 0) this.pending.splice(idx, 1);
+        // Destroy the socket: a late server response would otherwise resolve
+        // the next request's resolver (FIFO desync) and poison the session.
+        this.close();
         reject(
           new Error(
-            `request timed out after ${timeoutMs}ms — is the app painting? (bring its window to the foreground)`,
+            `request timed out after ${timeoutMs}ms (socket closed; ${kind} will auto-reconnect on the next call)`,
           ),
         );
       }, timeoutMs);
@@ -562,7 +585,7 @@ function formatNodeCompact(node) {
 }
 
 async function fetchTree() {
-  const c = requireClient();
+  const c = await requireClient();
   const response = await c.request("GetTree");
   return flattenTree(unwrapResponse(response, "GetTree"));
 }
@@ -570,6 +593,17 @@ async function fetchTree() {
 function nodeCenter(node) {
   const b = node.bounds;
   return [Math.round((b[0] + b[2]) / 2), Math.round((b[1] + b[3]) / 2)];
+}
+
+// AccessKit node ids are regenerated every frame; this signature is the
+// stable identity we can actually compare across tree snapshots.
+function nodeSignature(node) {
+  return [
+    node.role,
+    node.label ?? "",
+    node.value ?? "",
+    node.bounds ? node.bounds.map((v) => Math.round(v * 10) / 10).join(",") : "",
+  ].join("|");
 }
 
 function pickNode(matches, index) {
@@ -657,9 +691,30 @@ let client = null;
 
 // Test hook: inject a stub client (see _test_setClient below).
 globalThis.__eguiBridgeSetClient = (c) => { client = c; };
+globalThis.__eguiBridgeGetClient = () => client;
 
-function requireClient() {
-  if (!client) throw new Error("not connected — call egui_attach first");
+// Test-only exports: the fake-server smoke test (test/smoke.mjs) speaks the
+// same wire protocol and reuses the extension's MessagePack codec.
+export { mpEncode as _mpEncode, mpDecode as _mpDecode };
+
+// Last successful attach endpoint — used for one-shot auto-reconnect after a
+// timed-out/closed connection, so a single hiccup no longer wedges the session
+// behind a manual egui_attach.
+let lastEndpoint = { host: "127.0.0.1", port: 5719 };
+
+async function requireClient() {
+  if (!client || !client.socket) {
+    // One-shot auto-reconnect to the last known endpoint.
+    try {
+      client = await InspectionClient.connect(lastEndpoint.host, lastEndpoint.port, 3000);
+      const info = await client.request("GetInfo", 5000);
+      client.info = unwrapResponse(info, "egui_attach:auto-reconnect");
+    } catch {
+      throw new Error(
+        `not connected and auto-reconnect to ${lastEndpoint.host}:${lastEndpoint.port} failed — run egui_attach (check that the harness window is running and in the foreground)`,
+      );
+    }
+  }
   return client;
 }
 
@@ -685,6 +740,7 @@ export default function (pi) {
         params.port ?? 5719,
         params.timeoutMs ?? 10000,
       );
+      lastEndpoint = { host: params.host ?? "127.0.0.1", port: params.port ?? 5719 };
       const info = await client.request("GetInfo");
       const unwrapped = unwrapResponse(info, "egui_attach");
       return {
@@ -807,7 +863,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const tree = await fetchTree();
       const matches = filterNodes(tree.nodes, params);
       if (matches.length === 0) {
@@ -833,7 +889,7 @@ export default function (pi) {
       const response = await c.request({ ApplyEvents: { events } });
       unwrapResponse(response, "egui_click_at");
       if (params.settle !== false) {
-        const settleResponse = await c.request({ Settle: { max_steps: 30 } });
+        const settleResponse = await c.request({ Settle: { max_steps: 30 } }, 8000);
         unwrapResponse(settleResponse, "egui_click_at:Settle");
       }
       return {
@@ -861,7 +917,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const tree = await fetchTree();
       const matches = filterNodes(tree.nodes, params);
       if (matches.length === 0) {
@@ -875,13 +931,13 @@ export default function (pi) {
       const clickEvents = [pointerMoved([x, y]), pointerButton([x, y], true), pointerButton([x, y], false)];
       const clickResponse = await c.request({ ApplyEvents: { events: clickEvents } });
       unwrapResponse(clickResponse, "egui_type_into:click");
-      await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle"));
+      await c.request({ Settle: { max_steps: 10 } }, 8000).then((r) => unwrapResponse(r, "egui_type_into:settle"));
       const typeEvents = [textEvent(params.text)];
       if (params.submit) typeEvents.push(...keyEventsForEnter());
       const typeResponse = await c.request({ ApplyEvents: { events: typeEvents } });
       unwrapResponse(typeResponse, "egui_type_into:type");
       const submitted = params.submit ? " + Enter" : "";
-      await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle2"));
+      await c.request({ Settle: { max_steps: 10 } }, 8000).then((r) => unwrapResponse(r, "egui_type_into:settle2"));
       return {
         content: [{ type: "text", text: `typed ${JSON.stringify(params.text)}${submitted} into ${formatNodeCompact(node)}` }],
         details: { node, x, y },
@@ -905,13 +961,30 @@ export default function (pi) {
       intervalMs: Type.Optional(
         Type.Number({ description: "Poll interval in ms (default 250)." }),
       ),
-    }),
-    async execute(_id, params) {
-      const c = requireClient();
+      onlyNew: Type.Optional(
+        Type.Boolean({
+                  description:
+                        "For expect='present': only report nodes that did NOT exist in the first snapshot (ignore pre-existing matches).",
+        }),
+      ),
+}),
+async execute(_id, params) {
+      const c = await requireClient();
       const expectAbsent = params.expect === "absent";
       const deadline = Date.now() + (params.timeoutMs ?? 5000);
       const interval = params.intervalMs ?? 250;
       let lastError = "";
+      let baselineSignatures = null;
+      if (params.onlyNew && !expectAbsent) {
+        try {
+                  const initial = await fetchTree();
+                  // AccessKit node ids are regenerated every frame, so compare by
+                  // (role, label, value, bounds) signature instead.
+                  baselineSignatures = new Set(initial.nodes.map(nodeSignature));
+        } catch (error) {
+                  lastError = String(error);
+        }
+      }
       for (;;) {
         let tree;
         try {
@@ -920,12 +993,16 @@ export default function (pi) {
           lastError = String(error);
         }
         if (tree) {
-          const matches = filterNodes(tree.nodes, params);
+          let matches = filterNodes(tree.nodes, params);
+          if (baselineSignatures) {
+            matches = matches.filter((n) => !baselineSignatures.has(nodeSignature(n)));
+          }
           const satisfied = expectAbsent ? matches.length === 0 : matches.length > 0;
           if (satisfied) {
+            const elapsed = Date.now() - (deadline - (params.timeoutMs ?? 5000));
             const text = expectAbsent
-              ? `condition met (absent) after ${Date.now() - (deadline - (params.timeoutMs ?? 5000))} ms`
-              : `matched after ${Date.now() - (deadline - (params.timeoutMs ?? 5000))} ms:\n${matches.map(formatNodeCompact).join("\n")}`;
+              ? `condition met (absent) after ${elapsed} ms`
+              : `matched after ${elapsed} ms${baselineSignatures ? " (new node)" : ""}:\n${matches.map(formatNodeCompact).join("\n")}`;
             return { content: [{ type: "text", text }], details: { count: matches.length } };
           }
         }
@@ -959,7 +1036,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const response = await c.request({
         GetScreenshot: { pixels_per_point: null },
       });
@@ -1050,7 +1127,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const clickCount = params.clickCount ?? 1;
       const events = [];
       for (let i = 1; i <= clickCount; i++) {
@@ -1078,7 +1155,7 @@ export default function (pi) {
     description: "Move the pointer to the given position without clicking.",
     parameters: Type.Object({ ...pointerXY }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const response = await c.request({
         ApplyEvents: { events: [pointerMoved([params.x, params.y])] },
       });
@@ -1108,7 +1185,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const events = [
         pointerMoved([params.x, params.y]),
         mouseWheel(params.deltaX ?? 0, params.deltaY ?? -40, [
@@ -1139,7 +1216,7 @@ export default function (pi) {
       text: Type.String({ description: "Text to type" }),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const events = [textEvent(params.text)];
       const response = await c.request({ ApplyEvents: { events } });
       unwrapResponse(response, "egui_type");
@@ -1164,7 +1241,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const pressed = params.pressed ?? true;
       if (!VALID_EGUI_KEYS.has(params.key)) {
         throw new Error(
@@ -1196,7 +1273,7 @@ export default function (pi) {
       height: Type.Number({ description: "Height in logical points" }),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const response = await c.request({
         Resize: {
           width: Math.round(params.width),
@@ -1223,7 +1300,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const response = await c.request({
         Settle: { max_steps: params.maxSteps ?? 30 },
       });
@@ -1253,7 +1330,7 @@ export default function (pi) {
       ),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const steps = params.steps ?? 10;
       const delay = params.stepDelayMs ?? 120;
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1305,7 +1382,7 @@ export default function (pi) {
       }),
     }),
     async execute(_id, params) {
-      const c = requireClient();
+      const c = await requireClient();
       const response = await c.request({
         ApplyEvents: { events: params.events },
       });
