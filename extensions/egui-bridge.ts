@@ -867,6 +867,12 @@ export default function (pi) {
       settle: Type.Optional(
         Type.Boolean({ description: "Wait for the app to go idle after the click (default true)." }),
       ),
+      verify: Type.Optional(
+        Type.Boolean({
+          description:
+            "After the click, re-fetch the tree and report the node's fresh state (toggled/value) — saves a follow-up lookup call.",
+        }),
+      ),
     }),
     async execute(_id, params) {
       const c = await requireClient();
@@ -898,11 +904,23 @@ export default function (pi) {
         const settleResponse = await c.request({ Settle: { max_steps: 30 } }, 8000);
         unwrapResponse(settleResponse, "egui_click_at:Settle");
       }
+      let verification = "";
+      if (params.verify) {
+        const fresh = await fetchTree();
+        const freshMatches = filterNodes(fresh.nodes, {
+          role: params.role,
+          label: params.label,
+        });
+        const same = freshMatches.find((n) => nodeSignature(n) === nodeSignature(node));
+        verification = same
+          ? `\nverified after click: ${formatNodeCompact(same)}`
+          : "\nverified after click: node no longer matches its pre-click signature (state likely changed)";
+      }
       return {
         content: [
           {
             type: "text",
-            text: `clicked (${x}, ${y}) x${clickCount} on ${formatNodeCompact(node)}`,
+            text: `clicked (${x}, ${y}) x${clickCount} on ${formatNodeCompact(node)}${verification}`,
           },
         ],
         details: { node, x, y },
