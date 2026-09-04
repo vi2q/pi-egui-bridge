@@ -47,6 +47,20 @@ The port defaults to `127.0.0.1:5719`; `EGUI_INSPECTION=<addr>` overrides it. Un
 | `egui_type` / `egui_key` | text input into the focused widget / key press |
 | `egui_resize` / `egui_settle` / `egui_batch` | window resize / wait for idle / raw event batch |
 
+## AzParam MCP tools (`azparam-mcp.ts`)
+
+This package also ships a thin MCP client for the **azparam core MCP server** (the process launched with `azparam --mcp-http=9315`, default `http://127.0.0.1:9315/mcp`, overridable via `AZPARAM_MCP_URL`). It lets the agent test commands directly — numeric edits, entity queries, etc. — without driving the harness GUI, while the `egui_*` tools still cover visual verification.
+
+| Tool | Purpose |
+|------|---------|
+| `azparam_mcp_status` | probe the server (tools/list ping), optionally set the URL |
+| `azparam_mcp_list` | list the tool catalog (auto-paginates; optional name filter) |
+| `azparam_mcp_call` | call a tool (e.g. `engine_list_entities`, `engine_get_entity_info`, `engine_set_entity_position`, `get_object_detail`) |
+
+Notes:
+- `entity_id` must be a runtime entity **UUID** from `engine_list_entities` (or the harness hierarchy), not an index.
+- The tool catalog depends on the core's current app mode (editor / engine / editor2d / audio).
+
 ## Usage
 
 Start your app, then in pi:
