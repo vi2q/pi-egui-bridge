@@ -564,9 +564,21 @@ function nodeMatches(node, { role, label, at }) {
     if (!hay.includes(label.toLowerCase())) return false;
   }
   if (at) {
+    // Defensive: pi may deliver array params as a JSON-encoded string
+    // (observed with undeclared schema fields); parse instead of indexing
+    // characters off a string.
+    let point = at;
+    if (typeof point === "string") {
+      try {
+        point = JSON.parse(point);
+      } catch {
+        return false;
+      }
+    }
     const b = node.bounds;
-    if (!b || b.length !== 4) return false;
-    if (at[0] < b[0] || at[0] > b[2] || at[1] < b[1] || at[1] > b[3]) return false;
+    if (!b || b.length !== 4 || !Array.isArray(point) || point.length < 2) return false;
+    const [px, py] = [Number(point[0]), Number(point[1])];
+    if (px < b[0] || px > b[2] || py < b[1] || py > b[3]) return false;
   }
   return true;
 }
@@ -625,6 +637,11 @@ const locatorSchema = {
     Type.String({
       description:
         "Substring match on label or value (case-insensitive).",
+    }),
+  ),
+  at: Type.Optional(
+    Type.Array(Type.Number(), {
+      description: "Only nodes whose bounds contain this [x, y] logical point.",
     }),
   ),
   index: Type.Optional(
@@ -795,13 +812,7 @@ export default function (pi) {
     description:
       "Read the harness UI tree (AccessKit snapshot flattened: role, label, value, bounds, children). Bounds are logical points [x0,y0,x1,y1]. Supports filters (role / label substring / at point) and a compact one-line-per-node format — prefer filters over full dumps to save context.",
     parameters: Type.Object({
-      role: locatorSchema.role,
-      label: locatorSchema.label,
-      at: Type.Optional(
-        Type.Array(Type.Number(), {
-          description: "Only nodes whose bounds contain this [x, y] logical point.",
-        }),
-      ),
+      ...locatorSchema,
       compact: Type.Optional(
         Type.Boolean({ description: "One line per node (default true). false = full JSON with ids/children." }),
       ),
@@ -832,11 +843,6 @@ export default function (pi) {
       "Find nodes matching role/label/at filters and return them in compact form. Cheap alternative to egui_tree dumps.",
     parameters: Type.Object({
       ...locatorSchema,
-      at: Type.Optional(
-        Type.Array(Type.Number(), {
-          description: "Only nodes whose bounds contain this [x, y] logical point.",
-        }),
-      ),
     }),
     async execute(_id, params) {
       const tree = await fetchTree();
