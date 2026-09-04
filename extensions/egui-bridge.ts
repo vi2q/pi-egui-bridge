@@ -19,6 +19,7 @@ import { Type } from "typebox";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resizeImage, formatDimensionNote } from "@earendil-works/pi-coding-agent";
 
 const PROTOCOL_MAGIC = Buffer.from("eins");
 const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
@@ -636,7 +637,7 @@ export default function (pi) {
     name: "egui_screenshot",
     label: "EGUI Screenshot",
     description:
-      "Capture the harness window as PNG. Returns the image inline; the window must be visible (not fully occluded/minimized).",
+      "Capture the harness window as PNG (saved to a file) and return a compressed inline copy for viewing. The window must be visible (not fully occluded/minimized).",
     parameters: Type.Object({
       outputPath: Type.Optional(
         Type.String({
@@ -654,18 +655,47 @@ export default function (pi) {
       // payload: [size, bytes] (msgpack struct as list) or {size, bytes}
       const size = Array.isArray(payload) ? payload[0] : payload.size;
       const bytes = Array.isArray(payload) ? payload[1] : payload.bytes;
+      const raw = Buffer.from(bytes);
       const path =
         params.outputPath ?? join(tmpdir(), `egui_harness_${Date.now()}.png`);
-      writeFileSync(path, Buffer.from(bytes));
-      return {
-        content: [
-          { type: "text", text: `saved ${size[0]}x${size[1]} PNG to ${path}` },
-          {
+      writeFileSync(path, raw);
+      const text = `saved ${size[0]}x${size[1]} PNG to ${path}`;
+      // Full-resolution PNGs (e.g. 1440x900+ windows) base64 to several MiB and
+      // can exceed provider request-body limits (e.g. 4.5 MiB), killing the
+      // session. Inline a compressed copy instead; the full PNG stays on disk.
+      let image = null;
+      let dims = "";
+      try {
+        const resized = await resizeImage(raw, "image/png", {
+          maxWidth: 1280,
+          maxHeight: 1280,
+          maxBytes: 750_000,
+          jpegQuality: 75,
+        });
+        if (resized) {
+          image = {
             type: "image",
-            data: Buffer.from(bytes).toString("base64"),
-            mimeType: "image/png",
-          },
-        ],
+            data: resized.data,
+            mimeType: resized.mimeType,
+          };
+          const note = formatDimensionNote(resized);
+          if (note) dims = `\n${note}`;
+        }
+      } catch {
+        // fall through: file-only result
+      }
+      return {
+        content: image
+          ? [
+              { type: "text", text: text + dims },
+              image,
+            ]
+          : [
+              {
+                type: "text",
+                text: `${text}. Inline image omitted (compression failed); use the read tool on ${path} to view it.`,
+              },
+            ],
         details: { path, size },
       };
     },
