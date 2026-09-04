@@ -876,15 +876,11 @@ export default function (pi) {
       const clickResponse = await c.request({ ApplyEvents: { events: clickEvents } });
       unwrapResponse(clickResponse, "egui_type_into:click");
       await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle"));
-      const typed = await c.request({ ApplyText: { text: params.text } });
-      unwrapResponse(typed, "egui_type_into:type");
-      let submitted = "";
-      if (params.submit) {
-        const enterEvents = keyEventsForEnter();
-        const enterResponse = await c.request({ ApplyEvents: { events: enterEvents } });
-        unwrapResponse(enterResponse, "egui_type_into:enter");
-        submitted = " + Enter";
-      }
+      const typeEvents = [textEvent(params.text)];
+      if (params.submit) typeEvents.push(...keyEventsForEnter());
+      const typeResponse = await c.request({ ApplyEvents: { events: typeEvents } });
+      unwrapResponse(typeResponse, "egui_type_into:type");
+      const submitted = params.submit ? " + Enter" : "";
       await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle2"));
       return {
         content: [{ type: "text", text: `typed ${JSON.stringify(params.text)}${submitted} into ${formatNodeCompact(node)}` }],
