@@ -26,6 +26,15 @@ const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
 // Default per-request timeout: tools must not hang pi forever when the app
 // stops responding (user request 2026-09-04).
 const REQUEST_TIMEOUT_MS = 30_000;
+// Cumulative inline-image budget for the whole session (user instruction
+// 2026-09-04): pi resends the full history every turn and provider request-body
+// limits (e.g. 4.5 MiB) are byte-based, while pi's auto-compaction is
+// token-based and never fires for image-heavy sessions. Once too many
+// screenshots accumulate, every message fails with a 413 and the session is
+// unrecoverable. Track total inline base64 bytes across egui_screenshot calls
+// and stop inlining once the budget is exhausted (full PNGs stay on disk).
+const INLINE_IMAGE_BUDGET_BYTES = 1_500_000;
+let inlineImageBytesUsed = 0;
 // Valid egui Key enum names (egui 0.36: letters + named keys). Unknown names
 // are rejected before sending so a typo cannot produce a protocol error that
 // never answers.
@@ -670,7 +679,7 @@ export default function (pi) {
     name: "egui_screenshot",
     label: "EGUI Screenshot",
     description:
-      "Capture the harness window as PNG (saved to a file) and return a compressed inline copy for viewing. The window must be visible (not fully occluded/minimized).",
+      "Capture the harness window as PNG (saved to a file) and return a compressed inline copy for viewing (subject to a cumulative session inline-image budget; once exhausted, only the file is saved — start a new session to reset). The window must be visible (not fully occluded/minimized). Avoid the read tool on the saved full-resolution PNG: inlining it at original size can exceed provider request-body limits and kill the session.",
     parameters: Type.Object({
       outputPath: Type.Optional(
         Type.String({
@@ -698,24 +707,37 @@ export default function (pi) {
       // session. Inline a compressed copy instead; the full PNG stays on disk.
       let image = null;
       let dims = "";
-      try {
-        const resized = await resizeImage(raw, "image/png", {
-          maxWidth: 1280,
-          maxHeight: 1280,
-          maxBytes: 750_000,
-          jpegQuality: 75,
-        });
-        if (resized) {
-          image = {
-            type: "image",
-            data: resized.data,
-            mimeType: resized.mimeType,
-          };
-          const note = formatDimensionNote(resized);
-          if (note) dims = `\n${note}`;
+      let omittedReason = "";
+      if (inlineImageBytesUsed >= INLINE_IMAGE_BUDGET_BYTES) {
+        // Session budget exhausted: file-only result. Keep the wording away
+        // from "read the file" — inlining the full PNG re-inflates the
+        // request body and is what killed sessions before v0.2.2.
+        omittedReason = ` Inline image omitted: session inline-image budget exhausted (${Math.round(inlineImageBytesUsed / 1000)} kB used of ${Math.round(INLINE_IMAGE_BUDGET_BYTES / 1000)} kB). Start a new session to reset it, or inspect the UI via egui_tree instead.`;
+      } else {
+        try {
+          const resized = await resizeImage(raw, "image/png", {
+            maxWidth: 1280,
+            maxHeight: 1280,
+            maxBytes: 250_000,
+            jpegQuality: 75,
+          });
+          if (resized) {
+            image = {
+              type: "image",
+              data: resized.data,
+              mimeType: resized.mimeType,
+            };
+            inlineImageBytesUsed += resized.data.length;
+            const note = formatDimensionNote(resized);
+            if (note) dims = `\n${note}`;
+            dims += `\n(session inline-image budget: ${Math.round(inlineImageBytesUsed / 1000)}/${Math.round(INLINE_IMAGE_BUDGET_BYTES / 1000)} kB used)`;
+          } else {
+            omittedReason = " Inline image omitted (compression failed).";
+          }
+        } catch {
+          // fall through: file-only result
+          omittedReason = " Inline image omitted (compression failed).";
         }
-      } catch {
-        // fall through: file-only result
       }
       return {
         content: image
@@ -726,7 +748,12 @@ export default function (pi) {
           : [
               {
                 type: "text",
-                text: `${text}. Inline image omitted (compression failed); use the read tool on ${path} to view it.`,
+                // Do NOT suggest the read tool on `path`: reading the full-
+                // resolution PNG inlines it at original size (several MiB for
+                // 1440x900 windows) and can exceed provider request-body
+                // limits, killing the session (root cause of the 2026-09-04
+                // 413 failures alongside screenshot accumulation).
+                text: `${text}.${omittedReason} To view the screen, run egui_screenshot again (a fresh capture may compress better), or inspect structure via egui_tree.`,
               },
             ],
         details: { path, size },
