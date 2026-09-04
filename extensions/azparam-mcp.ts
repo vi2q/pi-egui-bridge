@@ -234,11 +234,24 @@ export default function register(pi: {
       ),
     }),
     async execute(_id, params) {
+      // pi may deliver the `arguments` field as a JSON-encoded string
+      // depending on the client serializer; accept both shapes.
+      let args = params.arguments ?? {};
+      if (typeof args === "string") {
+        try {
+          args = JSON.parse(args);
+        } catch {
+          throw new Error(`azparam_mcp_call: arguments is not valid JSON: ${args.slice(0, 100)}`);
+        }
+      }
+      if (typeof args !== "object" || args === null || Array.isArray(args)) {
+        throw new Error("azparam_mcp_call: arguments must be a JSON object");
+      }
       const result = await mcpPost(
         "tools/call",
         {
           name: params.tool,
-          arguments: params.arguments ?? {},
+          arguments: args,
         },
         params.tool,
       );
