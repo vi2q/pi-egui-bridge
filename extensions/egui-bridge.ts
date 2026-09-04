@@ -23,6 +23,31 @@ import { resizeImage, formatDimensionNote } from "@earendil-works/pi-coding-agen
 
 const PROTOCOL_MAGIC = Buffer.from("eins");
 const MAX_MESSAGE_BYTES = 256 * 1024 * 1024;
+// Default per-request timeout: tools must not hang pi forever when the app
+// stops responding (user request 2026-09-04).
+const REQUEST_TIMEOUT_MS = 30_000;
+// Valid egui Key enum names (egui 0.36: letters + named keys). Unknown names
+// are rejected before sending so a typo cannot produce a protocol error that
+// never answers.
+const VALID_EGUI_KEYS = new Set([
+  "Escape",
+  "Enter",
+  "Tab",
+  "Backspace",
+  "Delete",
+  "Insert",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Space",
+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split(""),
+  ...Array.from({ length: 20 }, (_, i) => `F${i + 1}`),
+]);
 
 // ---------------------------------------------------------------------------
 // Minimal MessagePack encoder (msgpack is not a built-in)
@@ -398,7 +423,7 @@ class InspectionClient {
     }
   }
 
-  request(request) {
+  request(request, timeoutMs = REQUEST_TIMEOUT_MS) {
     if (!this.socket)
       return Promise.reject(
         new Error("not connected — call egui_attach first"),
@@ -407,23 +432,31 @@ class InspectionClient {
       const body = mpEncode(request);
       const frame = Buffer.concat([Buffer.alloc(4), body]);
       frame.writeUInt32BE(body.length, 0);
-      this.pending.push(resolve);
-      const timer = setTimeout(() => {
-        const idx = this.pending.indexOf(resolve);
-        if (idx >= 0) {
-          this.pending.splice(idx, 1);
-          reject(new Error("request timed out (20s)"));
-        }
-      }, 20000);
-      resolve._timer = timer;
-      // Wrap resolve so the timer is cleared on success.
+      let settled = false;
       const wrapped = (msg) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         resolve(msg);
       };
-      this.pending[this.pending.length - 1] = wrapped;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = this.pending.indexOf(wrapped);
+        if (idx >= 0) this.pending.splice(idx, 1);
+        reject(
+          new Error(
+            `request timed out after ${timeoutMs}ms — is the app painting? (bring its window to the foreground)`,
+          ),
+        );
+      }, timeoutMs);
+      this.pending.push(wrapped);
       this.socket.write(frame, (err) => {
-        if (err) reject(err);
+        if (err && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
       });
     });
   }
@@ -836,6 +869,11 @@ export default function (pi) {
     async execute(_id, params) {
       const c = requireClient();
       const pressed = params.pressed ?? true;
+      if (!VALID_EGUI_KEYS.has(params.key)) {
+        throw new Error(
+          `unknown egui key '${params.key}' — use camelCase egui Key names (e.g. Enter, Escape, ArrowDown, A)`,
+        );
+      }
       const response = await c.request({
         ApplyEvents: { events: [keyEvent(params.key, pressed)] },
       });
