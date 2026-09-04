@@ -46,6 +46,12 @@ The port defaults to `127.0.0.1:5719`; `EGUI_INSPECTION=<addr>` overrides it. Un
 | `egui_drag` | press → move → release drag across frames (splitters, sliders). Required: egui needs separate frames for press/move/release to engage its drag state machine. |
 | `egui_type` / `egui_key` | text input into the focused widget / key press |
 | `egui_resize` / `egui_settle` / `egui_batch` | window resize / wait for idle / raw event batch |
+| `egui_find` | filtered node lookup (role / label / at point), compact one-line output |
+| `egui_click_at` | find a node by locator and click its center (no coordinate math) |
+| `egui_type_into` | find a widget, click it, type text (optional Enter to commit DragValue edits) |
+| `egui_wait_for` | poll the tree until a node appears/disappears (timeout + interval) |
+
+`egui_tree` supports the same filters (`role` / `label` / `at` / `compact`) — prefer them over full dumps to save context.
 
 ## AzParam MCP tools (`azparam-mcp.ts`)
 

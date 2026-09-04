@@ -116,6 +116,30 @@ function toolText(result: unknown): string {
     .join("\n");
 }
 
+/// Strip the receipt envelope (duplicates the whole payload) and per-command
+/// telemetry — they waste LLM context on every call. Keeps `message` and
+/// `data`. Non-JSON text is returned unchanged.
+function compactText(text: string): string {
+  try {
+    const parsed = JSON.parse(text);
+    const strip = (node) => {
+      if (Array.isArray(node)) return node.map(strip);
+      if (node && typeof node === "object") {
+        const out = {};
+        for (const [key, value] of Object.entries(node)) {
+          if (key === "receipt" || key === "telemetry") continue;
+          out[key] = strip(value);
+        }
+        return out;
+      }
+      return node;
+    };
+    return JSON.stringify(strip(parsed), null, 1);
+  } catch {
+    return text;
+  }
+}
+
 export default function register(pi: {
   registerTool: (tool: unknown) => void;
 }) {
@@ -232,6 +256,12 @@ export default function register(pi: {
             "Tool arguments object. Note: entity_id must be a runtime entity UUID (from engine_list_entities), not an index.",
         }),
       ),
+      compact: Type.Optional(
+        Type.Boolean({
+          description:
+            "Strip the receipt envelope and telemetry from the result (default true). Set false to see the full receipt.",
+        }),
+      ),
     }),
     async execute(_id, params) {
       // pi may deliver the `arguments` field as a JSON-encoded string
@@ -255,8 +285,10 @@ export default function register(pi: {
         },
         params.tool,
       );
+      const raw = toolText(result);
+      const text = params.compact === false ? raw : compactText(raw);
       return {
-        content: [{ type: "text", text: toolText(result) }],
+        content: [{ type: "text", text }],
         details: result as Record<string, unknown>,
       };
     },

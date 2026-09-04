@@ -531,6 +531,76 @@ function flattenTree(treePayload) {
   return { step, pixelsPerPoint, nodes, count: nodes.length };
 }
 
+// --- Node query helpers (context-economy: filter instead of full dumps) ---
+
+function nodeMatches(node, { role, label, at }) {
+  if (role && !String(node.role ?? "").toLowerCase().includes(role.toLowerCase()))
+    return false;
+  if (label) {
+    const hay = `${node.label ?? ""} ${node.value ?? ""}`.toLowerCase();
+    if (!hay.includes(label.toLowerCase())) return false;
+  }
+  if (at) {
+    const b = node.bounds;
+    if (!b || b.length !== 4) return false;
+    if (at[0] < b[0] || at[0] > b[2] || at[1] < b[1] || at[1] > b[3]) return false;
+  }
+  return true;
+}
+
+function filterNodes(nodes, filter) {
+  return nodes.filter((node) => nodeMatches(node, filter));
+}
+
+function formatNodeCompact(node) {
+  const parts = [String(node.role)];
+  if (node.label !== undefined) parts.push(`label=${JSON.stringify(node.label)}`);
+  if (node.value !== undefined) parts.push(`value=${JSON.stringify(node.value)}`);
+  if (node.bounds) parts.push(`bounds=[${node.bounds.map((v) => Math.round(v * 10) / 10).join(",")}]`);
+  if (node.toggled !== undefined) parts.push(`toggled=${node.toggled}`);
+  return parts.join(" ");
+}
+
+async function fetchTree() {
+  const c = requireClient();
+  const response = await c.request("GetTree");
+  return flattenTree(unwrapResponse(response, "GetTree"));
+}
+
+function nodeCenter(node) {
+  const b = node.bounds;
+  return [Math.round((b[0] + b[2]) / 2), Math.round((b[1] + b[3]) / 2)];
+}
+
+function pickNode(matches, index) {
+  const pick = index < 0 ? matches.length + index : index;
+  if (pick < 0 || pick >= matches.length) {
+    throw new Error(
+      `index ${index} out of range (${matches.length} matches). Matches:\n` +
+        matches.map(formatNodeCompact).join("\n"),
+    );
+  }
+  return matches[pick];
+}
+
+const locatorSchema = {
+  role: Type.Optional(
+    Type.String({ description: "Substring match on role (e.g. 'button', 'textInput')." }),
+  ),
+  label: Type.Optional(
+    Type.String({
+      description:
+        "Substring match on label or value (case-insensitive).",
+    }),
+  ),
+  index: Type.Optional(
+    Type.Number({
+      description:
+        "Occurrence to use when several nodes match (0-based; negative counts from the end). Default 0.",
+    }),
+  ),
+};
+
 // ---------------------------------------------------------------------------
 // Event builders (match egui Event serde representation)
 // ---------------------------------------------------------------------------
@@ -575,12 +645,18 @@ function textEvent(text) {
 function keyEvent(key, pressed, mods = NO_MODS) {
   return { Key: { key, pressed, repeat: false, modifiers: mods } };
 }
+function keyEventsForEnter() {
+  return [keyEvent("Enter", true), keyEvent("Enter", false)];
+}
 
 // ---------------------------------------------------------------------------
 // Extension registration
 // ---------------------------------------------------------------------------
 
 let client = null;
+
+// Test hook: inject a stub client (see _test_setClient below).
+globalThis.__eguiBridgeSetClient = (c) => { client = c; };
 
 function requireClient() {
   if (!client) throw new Error("not connected — call egui_attach first");
@@ -661,17 +737,215 @@ export default function (pi) {
     name: "egui_tree",
     label: "EGUI Tree",
     description:
-      "Read the harness UI tree (AccessKit snapshot flattened: role, label, value, bounds, children). Bounds are logical points [x0,y0,x1,y1].",
-    parameters: Type.Object({}),
-    async execute() {
+      "Read the harness UI tree (AccessKit snapshot flattened: role, label, value, bounds, children). Bounds are logical points [x0,y0,x1,y1]. Supports filters (role / label substring / at point) and a compact one-line-per-node format — prefer filters over full dumps to save context.",
+    parameters: Type.Object({
+      role: locatorSchema.role,
+      label: locatorSchema.label,
+      at: Type.Optional(
+        Type.Array(Type.Number(), {
+          description: "Only nodes whose bounds contain this [x, y] logical point.",
+        }),
+      ),
+      compact: Type.Optional(
+        Type.Boolean({ description: "One line per node (default true). false = full JSON with ids/children." }),
+      ),
+    }),
+    async execute(_id, params) {
+      let tree = await fetchTree();
+      const filter = { role: params.role, label: params.label, at: params.at };
+      if (params.role || params.label || params.at) {
+        tree = { ...tree, nodes: filterNodes(tree.nodes, filter), count: undefined };
+        tree.count = tree.nodes.length;
+      }
+      if (params.compact === false) {
+        return {
+          content: [{ type: "text", text: JSON.stringify(tree, null, 1) }],
+          details: tree,
+        };
+      }
+      const lines = tree.nodes.map(formatNodeCompact);
+      const text = `step=${tree.step} ppp=${tree.pixelsPerPoint} nodes=${lines.length}\n${lines.join("\n")}`;
+      return { content: [{ type: "text", text }], details: { count: lines.length } };
+    },
+  });
+
+  pi.registerTool({
+    name: "egui_find",
+    label: "EGUI Find",
+    description:
+      "Find nodes matching role/label/at filters and return them in compact form. Cheap alternative to egui_tree dumps.",
+    parameters: Type.Object({
+      ...locatorSchema,
+      at: Type.Optional(
+        Type.Array(Type.Number(), {
+          description: "Only nodes whose bounds contain this [x, y] logical point.",
+        }),
+      ),
+    }),
+    async execute(_id, params) {
+      const tree = await fetchTree();
+      const matches = filterNodes(tree.nodes, params);
+      const text = matches.length
+        ? `${matches.length} match(es):\n${matches.map(formatNodeCompact).join("\n")}`
+        : "no matches";
+      return { content: [{ type: "text", text }], details: { count: matches.length } };
+    },
+  });
+
+  pi.registerTool({
+    name: "egui_click_at",
+    label: "EGUI Click At (locator)",
+    description:
+      "Find a node by role/label substring and click its center. Replaces manual egui_tree + egui_click coordinate math and is robust against layout shifts. Requires an attached, foreground app window.",
+    parameters: Type.Object({
+      ...locatorSchema,
+      clickCount: Type.Optional(
+        Type.Number({ description: "1=single (default), 2=double" }),
+      ),
+      settle: Type.Optional(
+        Type.Boolean({ description: "Wait for the app to go idle after the click (default true)." }),
+      ),
+    }),
+    async execute(_id, params) {
       const c = requireClient();
-      const response = await c.request("GetTree");
-      const payload = unwrapResponse(response, "egui_tree");
-      const tree = flattenTree(payload);
+      const tree = await fetchTree();
+      const matches = filterNodes(tree.nodes, params);
+      if (matches.length === 0) {
+        return {
+          content: [{ type: "text", text: `no node matches role=${params.role ?? ""} label=${params.label ?? ""}` }],
+          details: { found: 0 },
+        };
+      }
+      const node = pickNode(matches, params.index ?? 0);
+      const [x, y] = nodeCenter(node);
+      const clickCount = params.clickCount ?? 1;
+      const events = [];
+      for (let i = 1; i <= clickCount; i++) {
+        events.push(pointerMoved([x, y]));
+        events.push(pointerButton([x, y], true));
+        events.push(pointerButton([x, y], false));
+        if (i < clickCount) {
+          // egui needs separate frames for press/release to register the
+          // click_count on the second press.
+          await c.request({ ApplyEvents: { events: [pointerMoved([x, y])] } });
+        }
+      }
+      const response = await c.request({ ApplyEvents: { events } });
+      unwrapResponse(response, "egui_click_at");
+      if (params.settle !== false) {
+        const settleResponse = await c.request({ Settle: { max_steps: 30 } });
+        unwrapResponse(settleResponse, "egui_click_at:Settle");
+      }
       return {
-        content: [{ type: "text", text: JSON.stringify(tree, null, 1) }],
-        details: tree,
+        content: [
+          {
+            type: "text",
+            text: `clicked (${x}, ${y}) x${clickCount} on ${formatNodeCompact(node)}`,
+          },
+        ],
+        details: { node, x, y },
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "egui_type_into",
+    label: "EGUI Type Into (locator)",
+    description:
+      "Find a widget by role/label substring, click it, and type text into it. Works for textInput widgets (appends; use submit to commit) and DragValue/spinButton widgets (click opens the inline editor and replaces the value). `submit` presses Enter after typing.",
+    parameters: Type.Object({
+      ...locatorSchema,
+      text: Type.String({ description: "Text to type into the focused widget." }),
+      submit: Type.Optional(
+        Type.Boolean({ description: "Press Enter after typing (commits DragValue edits). Default false." }),
+      ),
+    }),
+    async execute(_id, params) {
+      const c = requireClient();
+      const tree = await fetchTree();
+      const matches = filterNodes(tree.nodes, params);
+      if (matches.length === 0) {
+        return {
+          content: [{ type: "text", text: `no node matches role=${params.role ?? ""} label=${params.label ?? ""}` }],
+          details: { found: 0 },
+        };
+      }
+      const node = pickNode(matches, params.index ?? 0);
+      const [x, y] = nodeCenter(node);
+      const clickEvents = [pointerMoved([x, y]), pointerButton([x, y], true), pointerButton([x, y], false)];
+      const clickResponse = await c.request({ ApplyEvents: { events: clickEvents } });
+      unwrapResponse(clickResponse, "egui_type_into:click");
+      await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle"));
+      const typed = await c.request({ ApplyText: { text: params.text } });
+      unwrapResponse(typed, "egui_type_into:type");
+      let submitted = "";
+      if (params.submit) {
+        const enterEvents = keyEventsForEnter();
+        const enterResponse = await c.request({ ApplyEvents: { events: enterEvents } });
+        unwrapResponse(enterResponse, "egui_type_into:enter");
+        submitted = " + Enter";
+      }
+      await c.request({ Settle: { max_steps: 10 } }).then((r) => unwrapResponse(r, "egui_type_into:settle2"));
+      return {
+        content: [{ type: "text", text: `typed ${JSON.stringify(params.text)}${submitted} into ${formatNodeCompact(node)}` }],
+        details: { node, x, y },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "egui_wait_for",
+    label: "EGUI Wait For",
+    description:
+      "Poll the UI tree until a node matching role/label appears (or disappears with expect='absent'). Avoids manual click→settle→tree retry loops. Requires an attached app.",
+    parameters: Type.Object({
+      ...locatorSchema,
+      expect: Type.Optional(
+        Type.String({ description: "'present' (default) or 'absent'." }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({ description: "Overall timeout in ms (default 5000)." }),
+      ),
+      intervalMs: Type.Optional(
+        Type.Number({ description: "Poll interval in ms (default 250)." }),
+      ),
+    }),
+    async execute(_id, params) {
+      const c = requireClient();
+      const expectAbsent = params.expect === "absent";
+      const deadline = Date.now() + (params.timeoutMs ?? 5000);
+      const interval = params.intervalMs ?? 250;
+      let lastError = "";
+      for (;;) {
+        let tree;
+        try {
+          tree = await fetchTree();
+        } catch (error) {
+          lastError = String(error);
+        }
+        if (tree) {
+          const matches = filterNodes(tree.nodes, params);
+          const satisfied = expectAbsent ? matches.length === 0 : matches.length > 0;
+          if (satisfied) {
+            const text = expectAbsent
+              ? `condition met (absent) after ${Date.now() - (deadline - (params.timeoutMs ?? 5000))} ms`
+              : `matched after ${Date.now() - (deadline - (params.timeoutMs ?? 5000))} ms:\n${matches.map(formatNodeCompact).join("\n")}`;
+            return { content: [{ type: "text", text }], details: { count: matches.length } };
+          }
+        }
+        if (Date.now() >= deadline) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `timeout after ${params.timeoutMs ?? 5000} ms waiting for role=${params.role ?? ""} label=${params.label ?? ""} to become ${expectAbsent ? "absent" : "present"}${lastError ? ` (last error: ${lastError})` : ""}`,
+              },
+            ],
+            details: { matched: false },
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, interval));
+      }
     },
   });
 
